@@ -7,7 +7,6 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { ArrowLeft, CreditCard, Truck, Shield, CheckCircle, AlertCircle, Loader2 } from "lucide-react"
-import { supabase } from "@/lib/supabase"
 
 const BillingPage = ({ onBack }) => {
   const [formData, setFormData] = useState({
@@ -21,9 +20,10 @@ const BillingPage = ({ onBack }) => {
     quantity: 1,
   })
 
-  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [isProcessing, setIsProcessing] = useState(false)
   const [submitStatus, setSubmitStatus] = useState(null) // 'success', 'error', or null
   const [errorMessage, setErrorMessage] = useState("")
+  const [orderDetails, setOrderDetails] = useState(null)
 
   const handleInputChange = (e) => {
     setFormData({
@@ -66,6 +66,88 @@ const BillingPage = ({ onBack }) => {
     return true
   }
 
+  const loadRazorpayScript = () => {
+    return new Promise((resolve) => {
+      const script = document.createElement("script")
+      script.src = "https://checkout.razorpay.com/v1/checkout.js"
+      script.onload = () => resolve(true)
+      script.onerror = () => resolve(false)
+      document.body.appendChild(script)
+    })
+  }
+
+  const handlePayment = async (orderData) => {
+    const isScriptLoaded = await loadRazorpayScript()
+
+    if (!isScriptLoaded) {
+      setErrorMessage("Failed to load payment gateway. Please try again.")
+      setSubmitStatus("error")
+      return
+    }
+
+    const options = {
+      key: process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID,
+      amount: orderData.amount * 100, // Amount in paise
+      currency: orderData.currency,
+      name: "മാത്രുതികമുകിൽ",
+      description: "Malayalam Poetry Book by Marykutty Thomas",
+      image: "/favicon.ico", // Add your logo here
+      order_id: orderData.razorpayOrderId,
+      prefill: {
+        name: orderData.customerDetails.name,
+        email: orderData.customerDetails.email,
+        contact: orderData.customerDetails.contact,
+      },
+      theme: {
+        color: "#3B82F6", // Blue color matching your theme
+      },
+      handler: async (response) => {
+        try {
+          setIsProcessing(true)
+
+          // Verify payment on backend
+          const verifyResponse = await fetch("/api/razorpay/verify-payment", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              razorpay_order_id: response.razorpay_order_id,
+              razorpay_payment_id: response.razorpay_payment_id,
+              razorpay_signature: response.razorpay_signature,
+              orderId: orderData.orderId,
+            }),
+          })
+
+          const verifyResult = await verifyResponse.json()
+
+          if (verifyResult.success) {
+            setOrderDetails(verifyResult.order)
+            setSubmitStatus("success")
+          } else {
+            throw new Error(verifyResult.error || "Payment verification failed")
+          }
+        } catch (error) {
+          console.error("Payment verification error:", error)
+          setErrorMessage("Payment verification failed. Please contact support.")
+          setSubmitStatus("error")
+        } finally {
+          setIsProcessing(false)
+        }
+      },
+      modal: {
+        ondismiss: () => {
+          setIsProcessing(false)
+          setErrorMessage("Payment was cancelled")
+          setSubmitStatus("error")
+        },
+      },
+    }
+
+    const razorpay = new window.Razorpay(options)
+    razorpay.open()
+  }
+
   const handleSubmit = async (e) => {
     e.preventDefault()
 
@@ -74,61 +156,44 @@ const BillingPage = ({ onBack }) => {
       return
     }
 
-    setIsSubmitting(true)
+    setIsProcessing(true)
     setSubmitStatus(null)
     setErrorMessage("")
 
     try {
-      const bookPrice = 100
-      const shippingCost = 50
-      const totalAmount = bookPrice * formData.quantity + shippingCost
+      // Create order on backend
+      const response = await fetch("/api/razorpay/create-order", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          orderData: formData,
+        }),
+      })
 
-      // Insert order into Supabase
-      const { data, error } = await supabase
-        .from("orders")
-        .insert([
-          {
-            full_name: formData.fullName.trim(),
-            email: formData.email.trim().toLowerCase(),
-            phone: formData.phone.trim(),
-            address: formData.address.trim(),
-            city: formData.city.trim(),
-            state: formData.state.trim(),
-            pincode: formData.pincode.trim(),
-            quantity: Number.parseInt(formData.quantity),
-            book_price: bookPrice,
-            shipping_cost: shippingCost,
-            total_amount: totalAmount,
-            order_status: "pending",
-            payment_status: "pending",
-          },
-        ])
-        .select()
+      const result = await response.json()
 
-      if (error) {
-        throw error
+      if (result.success) {
+        // Open Razorpay payment modal
+        await handlePayment(result)
+      } else {
+        throw new Error(result.error || "Failed to create order")
       }
-
-      console.log("Order created successfully:", data)
-      setSubmitStatus("success")
-
-      // Optional: Send confirmation email here
-      // You can integrate with email service like Resend, SendGrid, etc.
     } catch (error) {
-      console.error("Error creating order:", error)
+      console.error("Order creation error:", error)
       setErrorMessage(error.message || "Failed to create order. Please try again.")
       setSubmitStatus("error")
-    } finally {
-      setIsSubmitting(false)
+      setIsProcessing(false)
     }
   }
 
-  const bookPrice = 100
+  const bookPrice = 350
   const shippingCost = 50
   const total = bookPrice * formData.quantity + shippingCost
 
   // Success state
-  if (submitStatus === "success") {
+  if (submitStatus === "success" && orderDetails) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50 py-8">
         <div className="container mx-auto px-4 max-w-2xl">
@@ -136,18 +201,36 @@ const BillingPage = ({ onBack }) => {
             <Card className="p-8">
               <CardContent className="pt-6">
                 <CheckCircle className="w-16 h-16 text-green-500 mx-auto mb-4" />
-                <h1 className="text-3xl font-bold text-slate-800 mb-4">Order Placed Successfully!</h1>
+                <h1 className="text-3xl font-bold text-slate-800 mb-4">Payment Successful!</h1>
                 <p className="text-slate-600 mb-6">
-                  Thank you for your order! We've received your request for "മാത്രുതികമുകിൽ" and will process it shortly.
+                  Thank you for your purchase! Your order for "മാത്രുതികമുകിൽ" has been confirmed.
                 </p>
-                <div className="bg-blue-50 p-4 rounded-lg mb-6">
-                  <p className="text-sm text-blue-800">
-                    <strong>What's next?</strong>
-                    <br />• You'll receive a confirmation email shortly
-                    <br />• We'll contact you within 24 hours to confirm payment details
-                    <br />• Your book will be shipped within 3-5 business days after payment
+
+                <div className="bg-blue-50 p-4 rounded-lg mb-6 text-left">
+                  <h3 className="font-semibold mb-2">Order Details:</h3>
+                  <p>
+                    <strong>Order ID:</strong> #{orderDetails.id.slice(0, 8)}
+                  </p>
+                  <p>
+                    <strong>Payment ID:</strong> {orderDetails.razorpay_payment_id}
+                  </p>
+                  <p>
+                    <strong>Amount Paid:</strong> ₹{orderDetails.total_amount}
+                  </p>
+                  <p>
+                    <strong>Status:</strong> <span className="text-green-600">Confirmed</span>
                   </p>
                 </div>
+
+                <div className="bg-green-50 p-4 rounded-lg mb-6">
+                  <p className="text-sm text-green-800">
+                    <strong>What's next?</strong>
+                    <br />• You'll receive a confirmation email shortly
+                    <br />• Your book will be shipped within 3-5 business days
+                    <br />• You can track your order status via email updates
+                  </p>
+                </div>
+
                 <div className="flex flex-col sm:flex-row gap-4 justify-center">
                   <Button onClick={onBack} variant="outline">
                     Place Another Order
@@ -166,7 +249,7 @@ const BillingPage = ({ onBack }) => {
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50 py-8">
       <div className="container mx-auto px-4 max-w-4xl">
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="mb-6">
-          <Button onClick={onBack} variant="ghost" className="mb-4 hover:bg-blue-50">
+          <Button onClick={onBack} variant="ghost" className="mb-4 hover:bg-blue-50" disabled={isProcessing}>
             <ArrowLeft className="w-4 h-4 mr-2" />
             Back to Book Details
           </Button>
@@ -182,6 +265,17 @@ const BillingPage = ({ onBack }) => {
               <p className="text-red-700">{errorMessage}</p>
             </div>
           </motion.div>
+        )}
+
+        {/* Processing Overlay */}
+        {isProcessing && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+            <div className="bg-white p-6 rounded-lg shadow-xl text-center">
+              <Loader2 className="w-8 h-8 animate-spin mx-auto mb-4 text-blue-600" />
+              <p className="text-lg font-semibold">Processing Payment...</p>
+              <p className="text-sm text-slate-600">Please don't close this window</p>
+            </div>
+          </div>
         )}
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
@@ -211,7 +305,7 @@ const BillingPage = ({ onBack }) => {
                         onChange={handleInputChange}
                         required
                         className="mt-1"
-                        disabled={isSubmitting}
+                        disabled={isProcessing}
                       />
                     </div>
                     <div>
@@ -224,7 +318,7 @@ const BillingPage = ({ onBack }) => {
                         onChange={handleInputChange}
                         required
                         className="mt-1"
-                        disabled={isSubmitting}
+                        disabled={isProcessing}
                       />
                     </div>
                   </div>
@@ -240,7 +334,7 @@ const BillingPage = ({ onBack }) => {
                       required
                       className="mt-1"
                       placeholder="10-digit mobile number"
-                      disabled={isSubmitting}
+                      disabled={isProcessing}
                     />
                   </div>
 
@@ -254,7 +348,7 @@ const BillingPage = ({ onBack }) => {
                       required
                       className="mt-1"
                       placeholder="House/Flat No, Street, Area"
-                      disabled={isSubmitting}
+                      disabled={isProcessing}
                     />
                   </div>
 
@@ -268,7 +362,7 @@ const BillingPage = ({ onBack }) => {
                         onChange={handleInputChange}
                         required
                         className="mt-1"
-                        disabled={isSubmitting}
+                        disabled={isProcessing}
                       />
                     </div>
                     <div>
@@ -280,7 +374,7 @@ const BillingPage = ({ onBack }) => {
                         onChange={handleInputChange}
                         required
                         className="mt-1"
-                        disabled={isSubmitting}
+                        disabled={isProcessing}
                       />
                     </div>
                     <div>
@@ -293,7 +387,7 @@ const BillingPage = ({ onBack }) => {
                         required
                         className="mt-1"
                         placeholder="6-digit PIN"
-                        disabled={isSubmitting}
+                        disabled={isProcessing}
                       />
                     </div>
                   </div>
@@ -309,24 +403,28 @@ const BillingPage = ({ onBack }) => {
                       value={formData.quantity}
                       onChange={handleInputChange}
                       className="mt-1"
-                      disabled={isSubmitting}
+                      disabled={isProcessing}
                     />
                   </div>
 
                   <Button
                     type="submit"
                     className="w-full bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 text-white py-3 text-lg font-semibold"
-                    disabled={isSubmitting}
+                    disabled={isProcessing}
                   >
-                    {isSubmitting ? (
+                    {isProcessing ? (
                       <>
                         <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                        Processing Order...
+                        Processing...
                       </>
                     ) : (
-                      `Place Order - ₹${total}`
+                      `Pay ₹${total} - Secure Payment`
                     )}
                   </Button>
+
+                  <div className="text-center text-sm text-slate-600">
+                    <p>🔒 Secured by Razorpay | All major cards accepted</p>
+                  </div>
                 </form>
               </CardContent>
             </Card>
@@ -388,7 +486,7 @@ const BillingPage = ({ onBack }) => {
                     <Shield className="w-5 h-5 text-green-600" />
                     <div>
                       <p className="font-medium">Secure Payment</p>
-                      <p className="text-sm text-slate-600">Your data is protected</p>
+                      <p className="text-sm text-slate-600">Powered by Razorpay</p>
                     </div>
                   </div>
                 </div>
